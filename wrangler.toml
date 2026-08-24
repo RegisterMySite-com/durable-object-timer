@@ -1,0 +1,14 @@
+name = "global-timer"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+
+# Durable Object binding – one global instance via idFromName("global-timer")
+[[durable_objects.bindings]]
+name = "TIMER"
+class_name = "Timer"
+
+# New Durable Object classes must use the SQLite storage backend.
+# The classic key-value Storage API (get/put/delete) still works fully.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Timer"]
