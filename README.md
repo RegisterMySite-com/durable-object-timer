@@ -1,2 +1,182 @@
-# durable-object-timer
-Persistent global clock timer with visitor tracking and bot filtering using Cloudflare Workers + Durable Objects
+# Global Persistent Timer + Visitor Counter
+
+A production-ready, globally shared wall-clock timer built with **Cloudflare Workers** and **Durable Objects**, plus a live visitor log.
+
+One single timer for the entire website. It starts the first time anyone visits, keeps counting accurately even when every visitor leaves (for hours or days), and shows the correct elapsed time the moment someone returns.
+
+It also records every visitor's IP, country (with flag), city, User-Agent and timestamp, then assigns a **bot score** (0-100).
+
+- **Total Visits** - all-time counter
+- **Real Visitors** / **Suspected Bots** - two columns for the last 24 hours
+- Bot score combines Cloudflare Bot Management, known bot User-Agents, missing headers, verified-bot flag, and simple behavioral signals (rapid repeats from the same IP). Score >= 45 -> Suspected Bot column.
+
+## How it works
+
+### The startTime approach (critical design decision)
+
+We **do not** keep a counter and increment it every second in the background. That would require the Durable Object to stay awake forever (expensive and against hibernation).
+
+Instead:
+
+1. The first time the timer is started we store a single value in Durable Object storage:
+
+   ```ts
+   startTime = Date.now(); // Unix timestamp in milliseconds
+   ```
+
+2. On every subsequent request (or WebSocket message) we simply calculate:
+
+   ```ts
+   elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+   ```
+
+Because the calculation uses the real wall clock, the timer continues correctly while the Durable Object is hibernated or completely evicted from memory. When a visitor returns days later the elapsed time is still exact.
+
+### Visitor tracking + bot filtering
+
+On every page load, `/api/status` call, or WebSocket connect the Worker / Durable Object records:
+
+- IP address (`CF-Connecting-IP`)
+- Country & city (from Cloudflare's `request.cf` geo data)
+- User-Agent
+- Timestamp
+- Composite bot score (0-100)
+
+Storage:
+
+- `totalVisits` - monotonically increasing all-time counter
+- `recentVisits` - array pruned to the last 24 hours (capped at 60 entries)
+
+The UI shows two columns: **Real Visitors** and **Suspected Bots** (with score badges and reasons).
+
+### Architecture
+
+```
+Browser  --HTTP/WS-->  Worker  --RPC / fetch-->  Durable Object "Timer"
+                                                   |
+                                                   +- storage: {
+                                                        startTime,
+                                                        totalVisits,
+                                                        recentVisits[]
+                                                      }
+```
+
+- **Worker** (`src/index.ts`)
+  - Serves the HTML frontend
+  - Exposes `/api/status`
+  - Forwards WebSocket upgrades to the Durable Object
+  - Extracts client IP + geo + UA and calls `recordVisit`
+
+- **Durable Object class `Timer`**
+  - Single instance obtained with `idFromName("global-timer")`
+  - RPC methods: `start()`, `getElapsedSeconds()`, `getStatus()`, `recordVisit()`, `reset()`
+  - WebSocket Hibernation API for live clients
+  - Persistent storage via `this.ctx.storage` (SQLite-backed)
+
+### Why the timer stays accurate when no one is on the site
+
+Durable Objects can be removed from memory after a short period of inactivity (hibernation). Hibernated WebSockets stay connected, but the object itself is gone. Because we only store a timestamp and never rely on in-memory counters or recurring alarms, the next request simply reads the stored `startTime` and recomputes the elapsed seconds from `Date.now()`. No background work is required.
+
+### WebSocket strategy
+
+- Client opens a WebSocket to `/ws`.
+- On connect the Durable Object records the visit and immediately sends the current status (including recent visitors).
+- The browser then runs a local `setInterval` that advances the display every second using the received `startTime`.
+  This keeps the UI smooth **without** waking the Durable Object every second.
+- Fallback polling of `/api/status` is also implemented.
+
+## Project structure
+
+```
+durable-object-timer/
+├── package.json
+├── wrangler.toml          # Durable Object binding + SQLite migration
+├── tsconfig.json
+├── src/
+│   └── index.ts           # Worker + Timer Durable Object + embedded frontend
+└── README.md
+```
+
+## Deploy
+
+### Prerequisites
+
+- Node.js 18+
+- A Cloudflare account
+- Wrangler CLI (installed via the project)
+
+```bash
+cd durable-object-timer
+npm install
+```
+
+### Local development
+
+```bash
+npx wrangler dev
+```
+
+Open the URL shown (usually `http://localhost:8787`).
+Note: in local mode `request.cf` geo data is usually absent and the IP will appear as `127.0.0.1`. Real country/city data appears only after deployment to the Cloudflare edge.
+
+### Production deploy
+
+```bash
+npx wrangler deploy
+```
+
+After deploy you will get a `*.workers.dev` URL (or your custom domain). The single global timer and visitor log are shared by every visitor of that Worker.
+
+### Configuration notes
+
+`wrangler.toml` already contains:
+
+```toml
+[[durable_objects.bindings]]
+name = "TIMER"
+class_name = "Timer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Timer"]
+```
+
+New Durable Object namespaces must use the SQLite storage backend (`new_sqlite_classes`). The classic key-value API (`storage.get` / `storage.put`) continues to work on top of SQLite.
+
+## API
+
+| Method | Path          | Description                                      |
+|--------|---------------|--------------------------------------------------|
+| GET    | `/`           | HTML frontend (records a visit)                  |
+| GET    | `/api/status` | JSON status + records a visit                    |
+| GET    | `/ws`         | WebSocket upgrade (visit recorded inside the DO) |
+
+## Making it per-room or per-user later
+
+The current design uses a single well-known name:
+
+```ts
+const id = env.TIMER.idFromName("global-timer");
+```
+
+To support many independent timers simply derive the ID from a room or user identifier:
+
+```ts
+const roomId = url.searchParams.get("room") ?? "default";
+const id = env.TIMER.idFromName(`timer:${roomId}`);
+const stub = env.TIMER.get(id);
+```
+
+Each unique name gets its own Durable Object instance with completely isolated storage.
+
+## Key takeaways
+
+- Store a timestamp, never a live counter.
+- Let the wall clock do the work.
+- Use WebSocket Hibernation so idle connections cost almost nothing.
+- Keep the Durable Object constructor and message handlers cheap so hibernation wake-ups stay fast.
+- Prefer RPC methods for ordinary operations; reserve `fetch` for WebSocket upgrades.
+- Visitor data is pruned automatically to the last 24 hours.
+- Bot score >= 45 filters visitors into the Suspected Bots column.
+
+Enjoy the timer that never sleeps.
