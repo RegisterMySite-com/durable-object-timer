@@ -1,6 +1,8 @@
 # Global Persistent Timer + Visitor Counter
 
-A production-ready, globally shared wall-clock timer built with **Cloudflare Workers** and **Durable Objects**, plus a live visitor log.
+A production-ready, globally shared wall-clock timer built with **Cloudflare Workers** and **Durable Objects**, plus a live visitor log with bot filtering.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/RegisterMySite-com/durable-object-timer)
 
 One single timer for the entire website. It starts the first time anyone visits, keeps counting accurately even when every visitor leaves (for hours or days), and shows the correct elapsed time the moment someone returns.
 
@@ -9,6 +11,94 @@ It also records every visitor's IP, country (with flag), city, User-Agent and ti
 - **Total Visits** - all-time counter
 - **Real Visitors** / **Suspected Bots** - two columns for the last 24 hours
 - Bot score combines Cloudflare Bot Management, known bot User-Agents, missing headers, verified-bot flag, and simple behavioral signals (rapid repeats from the same IP). Score >= 45 -> Suspected Bot column.
+
+## Deploy to Cloudflare
+
+Click the button above, or use this markdown on any page:
+
+```markdown
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/RegisterMySite-com/durable-object-timer)
+```
+
+Repo: [https://github.com/RegisterMySite-com/durable-object-timer](https://github.com/RegisterMySite-com/durable-object-timer)
+
+After deploy you will get a `*.workers.dev` URL (or attach a custom domain). Replace `YOUR_WORKER_URL` in the examples below with that hostname.
+
+## Embed analytics on any webpage (1×1 iframe)
+
+You can collect visitor vs bot analytics on **any** HTML site by embedding a 1×1 transparent iframe that points at your deployed Worker. Every time a page loads, the iframe hits the Worker, which records the visit (IP, geo, User-Agent) and runs bot scoring — without showing anything to the user.
+
+### Minimal embed
+
+Paste this just before `</body>` on any page:
+
+```html
+<!-- durable-object-timer analytics pixel (1×1) -->
+<iframe
+  src="https://YOUR_WORKER_URL/api/status"
+  width="1"
+  height="1"
+  style="position:absolute;width:1px;height:1px;border:0;opacity:0;pointer-events:none;"
+  title="analytics"
+  loading="eager"
+  referrerpolicy="no-referrer-when-downgrade"
+></iframe>
+```
+
+`/api/status` both records the visit **and** returns JSON. The iframe does not need to display the response; the request alone is enough for tracking.
+
+### Alternative: hit the HTML root
+
+If you prefer the main page endpoint (also records a visit):
+
+```html
+<iframe
+  src="https://YOUR_WORKER_URL/"
+  width="1"
+  height="1"
+  style="position:absolute;width:1px;height:1px;border:0;clip:rect(0,0,0,0);"
+  title="analytics"
+  loading="eager"
+></iframe>
+```
+
+### Example with a custom domain
+
+```html
+<iframe
+  src="https://global-timer.example.com/api/status"
+  width="1"
+  height="1"
+  style="position:absolute;width:1px;height:1px;border:0;opacity:0;pointer-events:none;"
+  title="analytics"
+></iframe>
+```
+
+### What gets recorded
+
+Each iframe load records:
+
+| Field | Source |
+|-------|--------|
+| IP | `CF-Connecting-IP` |
+| Country / city | Cloudflare `request.cf` |
+| User-Agent | Request headers |
+| Timestamp | Server wall clock |
+| Bot score (0–100) | CF Bot Management + UA patterns + behavior |
+| Real vs bot | Score >= 45 → Suspected Bot |
+
+View results on the Worker dashboard UI (`https://YOUR_WORKER_URL/`) or via:
+
+```bash
+curl https://YOUR_WORKER_URL/api/status
+```
+
+### Notes
+
+- The iframe is invisible (`1×1`, `opacity:0`, no pointer events).
+- Cross-origin embeds work; the Worker responds with permissive CORS.
+- Some browsers or privacy extensions may block third-party iframes; first-party custom domains (e.g. `analytics.yourdomain.com`) improve reliability.
+- Bot scoring still runs on iframe traffic (crawlers, headless tools, empty UAs, etc.).
 
 ## How it works
 
@@ -97,7 +187,7 @@ durable-object-timer/
 └── README.md
 ```
 
-## Deploy
+## Deploy (CLI)
 
 ### Prerequisites
 
@@ -125,7 +215,7 @@ Note: in local mode `request.cf` geo data is usually absent and the IP will appe
 npx wrangler deploy
 ```
 
-After deploy you will get a `*.workers.dev` URL (or your custom domain). The single global timer and visitor log are shared by every visitor of that Worker.
+Or use the Deploy to Cloudflare button at the top of this README.
 
 ### Configuration notes
 
@@ -178,5 +268,6 @@ Each unique name gets its own Durable Object instance with completely isolated s
 - Prefer RPC methods for ordinary operations; reserve `fetch` for WebSocket upgrades.
 - Visitor data is pruned automatically to the last 24 hours.
 - Bot score >= 45 filters visitors into the Suspected Bots column.
+- Embed a 1×1 iframe to collect analytics on any site.
 
 Enjoy the timer that never sleeps.
